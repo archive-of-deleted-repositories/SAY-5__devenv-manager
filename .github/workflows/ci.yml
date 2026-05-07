@@ -44,8 +44,21 @@ jobs:
           echo "Go coverage: $pct%"
           # The internal/docker thin SDK wrapper and the cmd/ entry points
           # are exercised by integration + chaos tests rather than unit
-          # tests, so the unit-only floor is set deliberately low.
-          awk -v c="$pct" 'BEGIN { exit (c+0 >= 40) ? 0 : 1 }'
+          # tests, so the unit-only floor is set deliberately low. v1
+          # raises this from 40 to 45 once the fuzz + decision-table tests
+          # land.
+          awk -v c="$pct" 'BEGIN { exit (c+0 >= 45) ? 0 : 1 }'
+      - name: fuzz seed validation
+        run: |
+          for fz in FuzzFrameUnmarshal FuzzFrameTypeDispatch; do
+            go test -run='^$' -fuzz="$fz" -fuzztime=5s ./internal/ws/...
+          done
+          for fz in FuzzRefreshTTL FuzzExpirySequence; do
+            go test -run='^$' -fuzz="$fz" -fuzztime=5s ./internal/session/...
+          done
+          for fz in FuzzEvaluateDecisionTable FuzzDecisionStringStable; do
+            go test -run='^$' -fuzz="$fz" -fuzztime=5s ./internal/reaper/...
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: go-coverage
@@ -138,6 +151,33 @@ jobs:
           path: |
             bench/chaos-result-ci.json
             bench/chaos-server.log
+
+  e2e-frontend:
+    runs-on: ubuntu-24.04
+    needs: [test-frontend, lint-frontend]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: install playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: run e2e (hermetic — backend + WS stubbed)
+        run: pnpm e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
 
   build-image:
     runs-on: ubuntu-24.04

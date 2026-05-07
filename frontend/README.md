@@ -1,73 +1,40 @@
-# React + TypeScript + Vite
+# devenv-manager frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite + xterm.js UI for the manager. Talks to the Go backend over
+REST (`/v1/*`) and a single WebSocket (`/v1/sessions/{id}/ws`).
 
-Currently, two official plugins are available:
+## Scripts
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+| Command           | Purpose                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `pnpm dev`        | Vite dev server with HMR (default port 5173)            |
+| `pnpm build`      | Type-check + production bundle                          |
+| `pnpm test`       | Vitest unit tests (jsdom)                               |
+| `pnpm e2e`        | Playwright e2e tests (chromium + Pixel 5 mobile)        |
+| `pnpm typecheck`  | `tsc --noEmit`                                          |
+| `pnpm lint`       | ESLint                                                  |
+| `pnpm format`     | Prettier                                                |
 
-## React Compiler
+## E2E test paths
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The e2e suite has two execution modes; both live in `frontend/e2e/`.
 
-## Expanding the ESLint configuration
+- **Hermetic (default).** `/v1/*` is intercepted via `page.route` and the
+  `WebSocket` constructor is replaced with an in-page `FakeWS` that
+  records frame traffic on `window.__wsFrames`. The `Terminal` component
+  exposes `window.__devenvTerminalSendInput` when
+  `window.__DEVENV_E2E_HOOKS === true` so the spec can drive the input
+  path without going through xterm.js's keyboard handling, which is
+  unreliable through synthesized events. CI runs this path.
+- **Live (`E2E_REAL_BACKEND=1`).** Skips the FakeWS install. Run the
+  docker-compose stack first (`make up`) and pre-pull `alpine:3.20` so
+  the test starts a real session.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+The mobile project uses Pixel 5 (chromium-based) instead of iPhone 12
+(webkit) so a single browser install suffices in CI.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Test hooks
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+The Terminal component exposes `window.__devenvTerminalSendInput(text)`
+when `window.__DEVENV_E2E_HOOKS === true`. The hook is a no-op in
+production builds because the flag is never set.

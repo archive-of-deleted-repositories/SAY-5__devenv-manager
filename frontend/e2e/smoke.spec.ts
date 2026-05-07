@@ -26,7 +26,9 @@ test.beforeEach(async ({ page }) => {
 test("loads the app and shows the image picker", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "devenv-manager" })).toBeVisible();
-  await expect(page.getByText("Start a session")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Start a session" }),
+  ).toBeVisible();
   await expect(page.locator("select")).toBeVisible();
   // First option should be the first image in the allowlist
   const options = await page.locator("select option").allTextContents();
@@ -43,5 +45,7 @@ test("layout collapses to single column on mobile viewport", async ({ page }) =>
   await page.goto("/");
   // viewport already 390x664 from the iPhone 12 device profile
   // no element should overflow horizontally; image picker stays visible
-  await expect(page.getByText("Start a session")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Start a session" }),
+  ).toBeVisible();
 });

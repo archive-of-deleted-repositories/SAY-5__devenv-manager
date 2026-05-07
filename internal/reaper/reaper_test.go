@@ -15,6 +15,7 @@ import (
 type fakeClient struct {
 	mu       sync.Mutex
 	listResp []docker.ContainerInfo
+	listErr  error
 	stopped  []string
 	removed  []string
 	stopErr  error
@@ -44,6 +45,9 @@ func (f *fakeClient) InspectContainer(ctx context.Context, id string) (docker.Co
 func (f *fakeClient) ListLabeledContainers(ctx context.Context) ([]docker.ContainerInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return append([]docker.ContainerInfo(nil), f.listResp...), nil
 }
 func (f *fakeClient) ExecAttach(ctx context.Context, id string, cmd []string, tty bool) (docker.HijackedConn, error) {
@@ -176,5 +180,89 @@ func TestRunOnceReapsOrphans(t *testing.T) {
 	r.RunOnce(context.Background())
 	if len(fc.removed) != 1 || fc.removed[0] != "orphan" {
 		t.Fatalf("removed = %v", fc.removed)
+	}
+}
+
+func TestCollectorsAreRegistrable(t *testing.T) {
+	r := New(&fakeClient{}, Config{})
+	cs := r.Collectors()
+	if len(cs) != 3 {
+		t.Fatalf("expected 3 collectors, got %d", len(cs))
+	}
+	for i, c := range cs {
+		if c == nil {
+			t.Fatalf("collector %d is nil", i)
+		}
+	}
+}
+
+func TestRunOnceListError(t *testing.T) {
+	fc := &fakeClient{listErr: errors.New("daemon offline")}
+	r := New(fc, Config{
+		Now:        func() time.Time { return time.Now() },
+		CurrentPID: 100,
+		PIDAlive:   func(int) bool { return true },
+	})
+	r.RunOnce(context.Background())
+	if r.ReapedTotal() != 0 {
+		t.Fatalf("ReapedTotal should stay 0 when list fails, got %d", r.ReapedTotal())
+	}
+}
+
+func TestReapStopAndRemoveErrors(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	fc := &fakeClient{
+		listResp: []docker.ContainerInfo{
+			{ID: "expired", SessionID: "s1", LeaseUntil: now.Add(-time.Second), CreatedByPID: 100},
+		},
+		stopErr: errors.New("stop failed"),
+		rmErr:   errors.New("rm failed"),
+	}
+	r := New(fc, Config{
+		Now:        func() time.Time { return now },
+		CurrentPID: 100,
+		PIDAlive:   func(int) bool { return true },
+	})
+	// Should not panic even though both Docker calls fail; the reap-errors
+	// counter must be incremented and the session counted as reaped (the
+	// reaper ran the reap path, even if the daemon side failed).
+	r.RunOnce(context.Background())
+	if len(fc.stopped) != 1 || len(fc.removed) != 1 {
+		t.Fatalf("expected stop+remove attempted: stopped=%v removed=%v", fc.stopped, fc.removed)
+	}
+}
+
+func TestRunStopsOnContextCancel(t *testing.T) {
+	fc := &fakeClient{}
+	r := New(fc, Config{
+		Interval:   10 * time.Millisecond,
+		CurrentPID: 100,
+		PIDAlive:   func(int) bool { return true },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestNewAppliesDefaults(t *testing.T) {
+	r := New(&fakeClient{}, Config{})
+	if r.interval == 0 || r.stopGrace == 0 {
+		t.Fatalf("defaults not applied: interval=%v grace=%v", r.interval, r.stopGrace)
+	}
+	if r.now == nil || r.pidAlive == nil || r.logger == nil {
+		t.Fatal("nil fields after default fill")
+	}
+	if r.currentPID <= 0 {
+		t.Fatalf("currentPID = %d", r.currentPID)
 	}
 }

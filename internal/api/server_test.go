@@ -272,6 +272,125 @@ func TestDeleteSession(t *testing.T) {
 	}
 }
 
+func TestGetSessionFound(t *testing.T) {
+	fc := &fakeClient{}
+	ts, mgr := newTestServer(t, fc)
+	mgr.Add(&session.Session{ID: "s1", ContainerID: "c1", Image: "alpine:3.20", CreatedAt: time.Now()})
+	resp, err := http.Get(ts.URL + "/v1/sessions/s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body apiTypes.Session
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.ID != "s1" || body.ContainerID != "c1" {
+		t.Fatalf("body = %+v", body)
+	}
+	if body.ContainerState != "running" {
+		t.Fatalf("state = %q", body.ContainerState)
+	}
+}
+
+func TestGetSessionMissing(t *testing.T) {
+	fc := &fakeClient{}
+	ts, _ := newTestServer(t, fc)
+	resp, err := http.Get(ts.URL + "/v1/sessions/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestGetSessionInspectFailureFallsBackToUnknown(t *testing.T) {
+	fc := &fakeClient{
+		inspectFn: func(string) (docker.ContainerInfo, error) {
+			return docker.ContainerInfo{}, errors.New("inspect failed")
+		},
+	}
+	ts, mgr := newTestServer(t, fc)
+	mgr.Add(&session.Session{ID: "s1", ContainerID: "c1", CreatedAt: time.Now()})
+	resp, err := http.Get(ts.URL + "/v1/sessions/s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body apiTypes.Session
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.ContainerState != "unknown" {
+		t.Fatalf("expected 'unknown' on inspect failure, got %q", body.ContainerState)
+	}
+}
+
+func TestCreateSessionInvalidBody(t *testing.T) {
+	fc := &fakeClient{}
+	ts, _ := newTestServer(t, fc)
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader([]byte("not-json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var er apiTypes.ErrorResponse
+	_ = json.NewDecoder(resp.Body).Decode(&er)
+	if er.Code != "invalid_body" {
+		t.Fatalf("code = %q", er.Code)
+	}
+}
+
+func TestCreateSessionDockerCreateFails(t *testing.T) {
+	fc := &fakeClient{createErr: errors.New("daemon disk full")}
+	ts, _ := newTestServer(t, fc)
+	body, _ := json.Marshal(apiTypes.CreateSessionRequest{Image: "alpine:3.20"})
+	resp, err := http.Post(ts.URL+"/v1/sessions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestCorsPreflight(t *testing.T) {
+	fc := &fakeClient{}
+	ts, _ := newTestServer(t, fc)
+	req, _ := http.NewRequest(http.MethodOptions, ts.URL+"/v1/sessions", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") == "" {
+		t.Fatal("CORS header missing")
+	}
+}
+
+func TestRequestIDIsPassedThrough(t *testing.T) {
+	fc := &fakeClient{}
+	ts, _ := newTestServer(t, fc)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/healthz", nil)
+	req.Header.Set("X-Request-ID", "rid-abc-123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-Request-ID"); got != "rid-abc-123" {
+		t.Fatalf("X-Request-ID = %q, want rid-abc-123", got)
+	}
+}
+
 func TestListSessions(t *testing.T) {
 	fc := &fakeClient{}
 	ts, mgr := newTestServer(t, fc)

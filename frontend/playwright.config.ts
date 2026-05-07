@@ -21,6 +21,9 @@ export default defineConfig({
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile", use: { ...devices["iPhone 12"] } },
+    // Pixel 5 (chromium-based) instead of iPhone 12 (webkit) so CI only
+    // needs a single browser install. The viewport-overflow assertions
+    // are what matters; they are agnostic to the rendering engine.
+    { name: "mobile", use: { ...devices["Pixel 5"] } },
   ],
 });

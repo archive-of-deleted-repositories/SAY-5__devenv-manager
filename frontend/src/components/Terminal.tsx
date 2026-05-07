@@ -55,12 +55,35 @@ export function Terminal({ sessionId, wsPath, apiBase, onClosed }: Props) {
     const onWindowResize = () => fit.fit();
     window.addEventListener("resize", onWindowResize);
 
+    // Test hook: expose a stable name so e2e specs can drive the input
+    // path without depending on xterm's keyboard handling, which is
+    // notoriously unreliable through synthesized events. This is gated
+    // behind a top-level flag that is never set in production builds.
+    if (
+      typeof window !== "undefined" &&
+      (window as unknown as { __DEVENV_E2E_HOOKS?: boolean }).__DEVENV_E2E_HOOKS
+    ) {
+      (
+        window as unknown as {
+          __devenvTerminalSendInput?: (s: string) => void;
+        }
+      ).__devenvTerminalSendInput = (s: string) => socket.sendInput(s);
+    }
+
     return () => {
       window.removeEventListener("resize", onWindowResize);
       dataDisp.dispose();
       resizeDisp.dispose();
       socket.close();
       term.dispose();
+      if (
+        typeof window !== "undefined" &&
+        (window as unknown as { __devenvTerminalSendInput?: unknown })
+          .__devenvTerminalSendInput
+      ) {
+        delete (window as unknown as { __devenvTerminalSendInput?: unknown })
+          .__devenvTerminalSendInput;
+      }
     };
   }, [sessionId, wsPath, apiBase, onClosed]);
 
