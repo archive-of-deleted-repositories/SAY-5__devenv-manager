@@ -41,7 +41,10 @@ jobs:
       - name: integration tests
         env:
           RUN_INTEGRATION: "1"
-        run: go test -race -count=1 -tags=integration -timeout=120s ./internal/docker/...
+        run: |
+          docker pull node:22-alpine
+          go test -race -count=1 -tags=integration -timeout=8m ./internal/docker/...
+          go test -race -count=1 -tags=integration -timeout=8m ./internal/imagebuild/...
       - name: coverage gate
         run: |
           pct=$(go tool cover -func=coverage.out | awk '/total:/ {print $3}' | tr -d '%')

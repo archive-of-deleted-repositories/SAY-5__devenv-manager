@@ -103,7 +103,10 @@ func (f *fakeDocker) CreateVolume(ctx context.Context, name string, labels map[s
 	return name, nil
 }
 func (f *fakeDocker) RemoveVolume(ctx context.Context, name string, force bool) error { return nil }
-func (f *fakeDocker) Close() error                                                    { return nil }
+func (f *fakeDocker) BuildImage(ctx context.Context, spec docker.ImageBuildSpec) (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader()), nil
+}
+func (f *fakeDocker) Close() error { return nil }
 
 func TestRelayPumpsOutputToWS(t *testing.T) {
 	loop := newLoopback()

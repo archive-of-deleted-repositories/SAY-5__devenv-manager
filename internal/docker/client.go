@@ -35,7 +35,17 @@ type Client interface {
 	Events(ctx context.Context, since time.Time) (<-chan EventMessage, <-chan error)
 	CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error)
 	RemoveVolume(ctx context.Context, name string, force bool) error
+	BuildImage(ctx context.Context, spec ImageBuildSpec) (io.ReadCloser, error)
 	Close() error
+}
+
+// ImageBuildSpec is the input to a Docker image build. Tag is the
+// resulting image reference; BuildContext is a tar-stream of the
+// Dockerfile + any companion files; BuildArgs is the --build-arg map.
+type ImageBuildSpec struct {
+	Tag          string
+	BuildArgs    map[string]string
+	BuildContext io.Reader
 }
 
 // ContainerSpec is the manager-level description we translate to Docker.
@@ -352,6 +362,31 @@ func (r *realClient) ResizeExec(ctx context.Context, execID string, cols, rows u
 		Width:  uint(cols),
 		Height: uint(rows),
 	})
+}
+
+// BuildImage submits a docker build with the given tag, build args, and
+// pre-tarred build context. Returns a stream of build output (NDJSON
+// frames per the engine API) which the caller drains while the build
+// runs. The image-build manager parses these frames into events.
+func (r *realClient) BuildImage(ctx context.Context, spec ImageBuildSpec) (io.ReadCloser, error) {
+	args := make(map[string]*string, len(spec.BuildArgs))
+	for k, v := range spec.BuildArgs {
+		v := v
+		args[k] = &v
+	}
+	resp, err := r.c.ImageBuild(ctx, spec.BuildContext, dtypes.ImageBuildOptions{
+		Tags:      []string{spec.Tag},
+		Remove:    true,
+		BuildArgs: args,
+		// CPU / memory caps are enforced by the manager via ulimit-style
+		// container limits; the engine API itself doesn't accept those
+		// at build submission, so the manager wraps the call in a
+		// timeout context (5 min wall-clock cap from the spec).
+	})
+	if err != nil {
+		return nil, fmt.Errorf("docker: image build: %w", err)
+	}
+	return resp.Body, nil
 }
 
 // CreateVolume creates a Docker named volume with the given name and

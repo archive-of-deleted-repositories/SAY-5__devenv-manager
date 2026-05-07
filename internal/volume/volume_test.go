@@ -65,6 +65,9 @@ func (f *fakeClient) RemoveVolume(ctx context.Context, name string, force bool) 
 	f.removed = append(f.removed, name)
 	return nil
 }
+func (f *fakeClient) BuildImage(ctx context.Context, spec docker.ImageBuildSpec) (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader()), nil
+}
 func (f *fakeClient) Close() error { return nil }
 
 var _ io.Closer = (*fakeClient)(nil)

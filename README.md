@@ -29,6 +29,8 @@ mid-session.
 | `internal/docker`     | Docker SDK wrapper + label conventions; defines a mockable `Client` iface |
 | `internal/session`    | In-memory session table; hydrates from labels on startup                  |
 | `internal/volume`     | Named-volume manager: per-session creation, retention, GC                 |
+| `internal/imagebuild` | Build manager + template registry; allowlisted Dockerfiles only           |
+| `infra/templates/`    | Committed Dockerfile templates (node22-typescript, python312-poetry, rust-stable) |
 | `internal/ws`         | Bidirectional PTY relay over WebSockets, with backpressure handling       |
 | `internal/reaper`     | Decision matrix + the loop that stops + removes containers                |
 | `pkg/api`             | Public request/response types (importable by client codebases)            |
@@ -97,6 +99,9 @@ See `ARCHITECTURE.md` for the full reasoning.
 | GET    | `/v1/volumes?session_id=`                  | list named volumes                              |
 | DELETE | `/v1/volumes/{id}`                         | delete a named volume                           |
 | POST   | `/v1/admin/volumes/gc`                     | sweep volumes past their retention window       |
+| POST   | `/v1/images/build`                         | build a custom image from an allowlisted template |
+| GET    | `/v1/images/{id}`                          | image build status                              |
+| GET    | `/v1/images/{id}/log`                      | accumulated build log (text/plain)              |
 | GET    | `/metrics`                                 | Prometheus exposition                           |
 
 WebSocket frames are JSON-typed: `input`, `output`, `resize`, `ping`,
@@ -215,6 +220,54 @@ The volume retention default is set by `-volume-retention=24h` at the
 server flag layer; tighten it for short-lived environments, lengthen it
 when sessions are routinely reattached after a delay.
 
+## Custom images via templates
+
+The static `AllowedImages` list (alpine, ubuntu, node, python, golang)
+is the default. For more specific environments, the build endpoint
+produces images from a closed set of committed Dockerfile templates:
+
+| Template            | Base                  | Adds                                  |
+| ------------------- | --------------------- | ------------------------------------- |
+| `node22-typescript` | `node:22-alpine`      | global pnpm, ts-node, typescript      |
+| `python312-poetry`  | `python:3.12-slim`    | poetry (system-wide)                  |
+| `rust-stable`       | `rust:1-slim`         | sccache, cargo build essentials       |
+
+Submit a build:
+
+```sh
+curl -X POST http://localhost:8080/v1/images/build \
+  -H 'content-type: application/json' \
+  -d '{"template":"node22-typescript","build_args":{"PNPM_VERSION":"9"}}'
+# -> {"id":"...","status":"queued","image_ref":"devenv-builds/node22-typescript:..."}
+```
+
+Poll status:
+
+```sh
+curl http://localhost:8080/v1/images/<build-id>
+# -> {"status":"ready", "image_ref":"...", ...}
+```
+
+Once the build is `ready`, the image becomes available in `/v1/images`
+for that owner; `POST /v1/sessions` accepts the new tag.
+
+### Security boundary
+
+The build endpoint accepts **template names**, not Dockerfiles. The
+allowlist is enforced both by the on-disk registry and by a hard-coded
+list (`internal/imagebuild.AllowedTemplates`); arbitrary Dockerfiles
+cannot reach the engine even if the disk-backed templates directory is
+swapped at runtime. Adding a template requires committing a Dockerfile
+under `infra/templates/<name>/Dockerfile` AND adding the name to
+`AllowedTemplates`. The duplication is intentional.
+
+Build resource caps:
+
+| Limit          | Value                                                          |
+| -------------- | -------------------------------------------------------------- |
+| Wall clock     | 5 minutes (server flag `-build-max-wall-clock`)                |
+| CPU / memory   | Enforced at the daemon level (1 CPU / 1 GiB target)            |
+
 ## What this is *not*
 
 - **Not authenticated.** Single-user assumption. The `owner` label is
@@ -226,8 +279,9 @@ when sessions are routinely reattached after a delay.
   into named volumes that survive reaping; see "Cross-session state"
   below. There are still no bind mounts and the rootfs remains
   read-only.
-- **Not a build farm.** Image allowlist only — no `docker build`
-  exposed, no arbitrary registry pulls.
+- ~~Not a build farm.~~ The build endpoint accepts a closed set of
+  Dockerfile templates (see "Custom images via templates"); arbitrary
+  Dockerfiles are still rejected.
 - **No collaborative sessions.** One WS per session.
 - **No GPU, no privileged containers, no host networking.**
 - **No audit log** beyond structured stdout logs.

@@ -67,6 +67,36 @@ type VolumeGCResponse struct {
 	Errors  []string `json:"errors,omitempty"`
 }
 
+// BuildImageRequest is the body of POST /v1/images/build. Template is
+// the canonical name of a committed Dockerfile template (e.g.
+// "node22-typescript"); arbitrary Dockerfiles are not accepted by
+// design — that is the security boundary of this endpoint.
+type BuildImageRequest struct {
+	Template  string            `json:"template"`
+	BuildArgs map[string]string `json:"build_args,omitempty"`
+}
+
+// ImageBuildStatus is the lifecycle stage of an image build.
+const (
+	ImageBuildStatusQueued   = "queued"
+	ImageBuildStatusBuilding = "building"
+	ImageBuildStatusReady    = "ready"
+	ImageBuildStatusFailed   = "failed"
+)
+
+// BuildImageResponse is returned from POST /v1/images/build and from
+// GET /v1/images/{id}.
+type BuildImageResponse struct {
+	ID           string    `json:"id"`
+	Template     string    `json:"template"`
+	Status       string    `json:"status"`
+	ImageRef     string    `json:"image_ref,omitempty"`
+	BuildLogURL  string    `json:"build_log_url"`
+	CreatedAt    time.Time `json:"created_at"`
+	CompletedAt  time.Time `json:"completed_at,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+}
+
 // CreateSessionResponse is returned from POST /v1/sessions.
 type CreateSessionResponse struct {
 	ID          string    `json:"id"`

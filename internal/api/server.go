@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/SAY-5/devenv-manager/internal/docker"
+	"github.com/SAY-5/devenv-manager/internal/imagebuild"
 	"github.com/SAY-5/devenv-manager/internal/session"
 	"github.com/SAY-5/devenv-manager/internal/volume"
 	"github.com/SAY-5/devenv-manager/internal/ws"
@@ -38,6 +39,7 @@ type Config struct {
 	Docker        docker.Client
 	Sessions      *session.Manager
 	Volumes       *volume.Manager
+	ImageBuilds   *imagebuild.Manager
 	DefaultTTL    time.Duration
 	MaxTTL        time.Duration
 	Owner         string
@@ -94,6 +96,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/volumes", s.handleListVolumes)
 	mux.HandleFunc("DELETE /v1/volumes/{id}", s.handleDeleteVolume)
 	mux.HandleFunc("POST /v1/admin/volumes/gc", s.handleVolumeGC)
+	mux.HandleFunc("POST /v1/images/build", s.handleBuildImage)
+	mux.HandleFunc("GET /v1/images/{id}", s.handleGetImageBuild)
+	mux.HandleFunc("GET /v1/images/{id}/log", s.handleGetImageBuildLog)
 	return s.middleware(mux)
 }
 
@@ -154,7 +159,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, api.ImagesResponse{Images: append([]string(nil), AllowedImages...)})
+	out := append([]string(nil), AllowedImages...)
+	if s.cfg.ImageBuilds != nil {
+		out = append(out, s.cfg.ImageBuilds.AllowedImagesFor(s.cfg.Owner)...)
+	}
+	writeJSON(w, http.StatusOK, api.ImagesResponse{Images: out})
+}
+
+// imageAllowed returns true when the requested image is on the static
+// allowlist OR has been produced by a successful build for this owner.
+func (s *Server) imageAllowed(image string) bool {
+	if slices.Contains(AllowedImages, image) {
+		return true
+	}
+	if s.cfg.ImageBuilds == nil {
+		return false
+	}
+	return slices.Contains(s.cfg.ImageBuilds.AllowedImagesFor(s.cfg.Owner), image)
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +191,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 // attach-volumes flow. parentID, when non-empty, scopes attach permission
 // to volumes that belong to that session.
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request, req api.CreateSessionRequest, parentID string) {
-	if !slices.Contains(AllowedImages, req.Image) {
+	if !s.imageAllowed(req.Image) {
 		writeErr(r.Context(), w, http.StatusBadRequest, "image_not_allowed",
 			fmt.Sprintf("image %q not in allowlist", req.Image), false)
 		return
@@ -402,6 +423,57 @@ func (s *Server) handleDeleteVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.ImageBuilds == nil {
+		writeErr(r.Context(), w, http.StatusServiceUnavailable, "builds_disabled",
+			"image build manager not configured", false)
+		return
+	}
+	var req api.BuildImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(r.Context(), w, http.StatusBadRequest, "invalid_body", err.Error(), false)
+		return
+	}
+	resp, err := s.cfg.ImageBuilds.Submit(r.Context(), s.cfg.Owner, req)
+	if err != nil {
+		writeErr(r.Context(), w, http.StatusBadRequest, "build_rejected", err.Error(), false)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func (s *Server) handleGetImageBuild(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.ImageBuilds == nil {
+		writeErr(r.Context(), w, http.StatusServiceUnavailable, "builds_disabled",
+			"image build manager not configured", false)
+		return
+	}
+	id := r.PathValue("id")
+	resp, err := s.cfg.ImageBuilds.Get(id)
+	if err != nil {
+		writeErr(r.Context(), w, http.StatusNotFound, "not_found", err.Error(), false)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleGetImageBuildLog(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.ImageBuilds == nil {
+		writeErr(r.Context(), w, http.StatusServiceUnavailable, "builds_disabled",
+			"image build manager not configured", false)
+		return
+	}
+	id := r.PathValue("id")
+	body, err := s.cfg.ImageBuilds.Log(id)
+	if err != nil {
+		writeErr(r.Context(), w, http.StatusNotFound, "not_found", err.Error(), false)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleVolumeGC(w http.ResponseWriter, r *http.Request) {

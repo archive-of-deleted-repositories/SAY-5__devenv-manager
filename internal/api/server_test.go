@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,6 +85,9 @@ func (f *fakeClient) RemoveVolume(ctx context.Context, name string, force bool) 
 	defer f.mu.Unlock()
 	f.removedVolumes = append(f.removedVolumes, name)
 	return nil
+}
+func (f *fakeClient) BuildImage(ctx context.Context, spec docker.ImageBuildSpec) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
 func (f *fakeClient) Close() error { return nil }
 

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/SAY-5/devenv-manager/internal/api"
 	"github.com/SAY-5/devenv-manager/internal/docker"
+	"github.com/SAY-5/devenv-manager/internal/imagebuild"
 	"github.com/SAY-5/devenv-manager/internal/reaper"
 	"github.com/SAY-5/devenv-manager/internal/session"
 	"github.com/SAY-5/devenv-manager/internal/volume"
@@ -31,6 +33,16 @@ func main() {
 	owner := flag.String("owner", "anonymous", "owner label applied to containers")
 	volumeRetention := flag.Duration("volume-retention", volume.DefaultRetention,
 		"how long a session's named volumes survive after the session is reaped")
+	templatesDir := flag.String("templates-dir", "infra/templates",
+		"path to allowlisted Dockerfile templates for /v1/images/build")
+	// Default to a path under TMPDIR so the binary runs without root.
+	// Operators production-deploying behind systemd should override this
+	// via a writable persistent path (e.g. /var/lib/devenv/buildlogs).
+	buildLogsDir := flag.String("build-logs-dir",
+		filepath.Join(os.TempDir(), "devenv-buildlogs"),
+		"directory for image-build log artefacts")
+	buildMaxWall := flag.Duration("build-max-wall-clock", imagebuild.MaxWallClock,
+		"per-build wall-clock cap")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -57,6 +69,16 @@ func main() {
 		Now:       time.Now,
 		Retention: *volumeRetention,
 	})
+	buildMgr, err := imagebuild.New(imagebuild.Config{
+		Docker:       dc,
+		Templates:    imagebuild.NewDiskRegistry(*templatesDir),
+		LogsDir:      *buildLogsDir,
+		MaxWallClock: *buildMaxWall,
+	})
+	if err != nil {
+		logger.Error("imagebuild: init", "err", err)
+		os.Exit(1)
+	}
 
 	// Hydrate from existing labeled containers — this makes restarts idempotent
 	// and keeps the session table addressable across crashes.
@@ -83,15 +105,16 @@ func main() {
 	dropped := &atomic.Int64{}
 
 	srv := api.NewServer(api.Config{
-		Docker:     dc,
-		Sessions:   mgr,
-		Volumes:    volMgr,
-		DefaultTTL: *defaultTTL,
-		MaxTTL:     *maxTTL,
-		Owner:      *owner,
-		Logger:     logger,
-		PID:        os.Getpid(),
-		DroppedOut: dropped,
+		Docker:      dc,
+		Sessions:    mgr,
+		Volumes:     volMgr,
+		ImageBuilds: buildMgr,
+		DefaultTTL:  *defaultTTL,
+		MaxTTL:      *maxTTL,
+		Owner:       *owner,
+		Logger:      logger,
+		PID:         os.Getpid(),
+		DroppedOut:  dropped,
 	})
 
 	mux := http.NewServeMux()
