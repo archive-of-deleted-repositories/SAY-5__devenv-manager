@@ -36,3 +36,4 @@ frontend/.vite/
 chaos-results.local.json
 bench/chaos-server.log
 bench/chaos-result-ci.json
+bench/results/

@@ -33,7 +33,11 @@ jobs:
           go-version: "1.25"
           cache: true
       - name: unit tests
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        # Coverage is scoped to internal+pkg; the cmd entry points and the
+        # bench/ helpers are exercised by integration, chaos, and bench
+        # smokes rather than by unit tests, and counting them dilutes the
+        # signal the unit-coverage gate is trying to defend.
+        run: go test -race -count=1 -coverprofile=coverage.out ./internal/... ./pkg/...
       - name: integration tests
         env:
           RUN_INTEGRATION: "1"
@@ -178,6 +182,34 @@ jobs:
         with:
           name: playwright-report
           path: frontend/playwright-report
+
+  bench-smoke:
+    runs-on: ubuntu-24.04
+    needs: [test-go]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: confirm docker daemon
+        run: docker info
+      - name: pre-pull alpine
+        run: docker pull alpine:3.20
+      - name: bench-regress (N=10 smoke gated against baseline)
+        env:
+          BENCH_N: "10"
+          BENCH_TTL: "120"
+          # Tolerance is intentionally loose for the smoke; the human-driven
+          # 100-session run is what tightens the bound.
+          BENCH_TOLERANCE: "3.0"
+        run: make bench-regress
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-smoke-results
+          path: |
+            bench/results/
 
   build-image:
     runs-on: ubuntu-24.04

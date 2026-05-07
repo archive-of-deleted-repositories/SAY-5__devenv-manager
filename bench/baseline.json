@@ -1,0 +1,13 @@
+{
+  "_comment": "Bench baseline targets for the N=10 CI smoke. Numbers are upper-bound expectations sampled from a colima-on-macOS run; native-Linux GitHub runners typically come in well under these. The regress gate uses tolerance=3.0x for the smoke (config in .github/workflows/ci.yml), so anything within 3x of these targets passes. Tighter human-driven 100-session runs use the default tolerance=2.0x.",
+  "n": 10,
+  "successes": 10,
+  "failures": 0,
+  "wall_clock_ns": 30000000000,
+  "provision_p50_ns": 5000000000,
+  "provision_p95_ns": 8000000000,
+  "provision_p99_ns": 10000000000,
+  "first_byte_p50_ns": 300000000,
+  "first_byte_p95_ns": 800000000,
+  "first_byte_p99_ns": 1500000000
+}

@@ -33,6 +33,8 @@ mid-session.
 | `pkg/api`             | Public request/response types (importable by client codebases)            |
 | `frontend/`           | React + Vite + xterm.js client                                            |
 | `bench/chaos.sh`      | Crash the server mid-session; assert zero orphans on restart              |
+| `bench/concurrent.go` | N-session concurrent provision bench (P50/P95/P99 + manager CPU/RSS)      |
+| `bench/regress`       | Compare a bench run against `bench/baseline.json` and gate CI             |
 | `infra/docker-compose.yml` | Local dev stack (manager + host docker.sock)                         |
 
 ## Quickstart
@@ -113,7 +115,30 @@ RUN_INTEGRATION=1 make test-integration   # Go + real Docker
 make chaos                # full chaos test (5 sessions)
 ```
 
-CI runs all of the above plus a `chaos-smoke` job (2 sessions for speed).
+CI runs all of the above plus:
+
+- `chaos-smoke` (2 sessions)
+- `bench-smoke` (10 sessions, gated against `bench/baseline.json` at 3x tolerance)
+
+## Bench
+
+`bench/concurrent.go` spawns N parallel sessions against a running
+manager, recording provisioning latency (POST → 201 with session ID) and
+first-byte latency (WS open → first inbound output frame) at P50/P95/P99,
+plus the manager's cumulative CPU time and RSS via `ps`. Output JSON is
+written under `bench/results/<unix>.json` (gitignored).
+
+```sh
+make bench               # full 100-session run
+BENCH_N=20 make bench    # smaller run
+make bench-regress       # 10-session smoke gated against bench/baseline.json
+```
+
+The regress gate fails if any of `provision_p50`, `provision_p95`,
+`provision_p99`, or `first_byte_p95` exceeds the baseline by more than
+the configured tolerance (default 2.0x; CI uses 3.0x for the smoke).
+When the baseline is missing the gate prints a message and exits 0; that
+escape hatch is what lets a fresh checkout bootstrap a baseline locally.
 
 ### Chaos test result
 
