@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-05-07T07:36:42Z",
+  "sessions_provisioned": 5,
+  "ttl_seconds": 15,
+  "reap_interval": "5s",
+  "max_wait_seconds": 60,
+  "wait_until_zero_seconds": 26,
+  "pre_kill_count": 5,
+  "post_kill_count": 5,
+  "orphans_remaining": 0,
+  "docker_version": "29.2.1"
+}
