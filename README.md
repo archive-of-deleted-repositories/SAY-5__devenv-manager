@@ -28,6 +28,7 @@ mid-session.
 | `internal/api`        | REST handlers, request-id middleware, allowlist gate                      |
 | `internal/docker`     | Docker SDK wrapper + label conventions; defines a mockable `Client` iface |
 | `internal/session`    | In-memory session table; hydrates from labels on startup                  |
+| `internal/volume`     | Named-volume manager: per-session creation, retention, GC                 |
 | `internal/ws`         | Bidirectional PTY relay over WebSockets, with backpressure handling       |
 | `internal/reaper`     | Decision matrix + the loop that stops + removes containers                |
 | `pkg/api`             | Public request/response types (importable by client codebases)            |
@@ -82,17 +83,21 @@ See `ARCHITECTURE.md` for the full reasoning.
 
 ## API surface (v1)
 
-| Method | Path                                  | Notes                                           |
-| ------ | ------------------------------------- | ----------------------------------------------- |
-| GET    | `/healthz`                            | reports Docker daemon reachability              |
-| GET    | `/v1/images`                          | the allowlist                                   |
-| POST   | `/v1/sessions`                        | creates and starts; body: image, ttl_seconds    |
-| GET    | `/v1/sessions`                        | lists sessions known to the manager             |
-| GET    | `/v1/sessions/{id}`                   | session detail                                  |
-| DELETE | `/v1/sessions/{id}`                   | stop + remove                                   |
-| POST   | `/v1/sessions/{id}/refresh`           | extend TTL                                      |
-| GET    | `/v1/sessions/{id}/ws`                | WebSocket upgrade for the PTY relay             |
-| GET    | `/metrics`                            | Prometheus exposition                           |
+| Method | Path                                       | Notes                                           |
+| ------ | ------------------------------------------ | ----------------------------------------------- |
+| GET    | `/healthz`                                 | reports Docker daemon reachability              |
+| GET    | `/v1/images`                               | the allowlist                                   |
+| POST   | `/v1/sessions`                             | creates and starts; body: image, ttl_seconds, volumes |
+| GET    | `/v1/sessions`                             | lists sessions known to the manager             |
+| GET    | `/v1/sessions/{id}`                        | session detail                                  |
+| DELETE | `/v1/sessions/{id}`                        | stop + remove (volumes survive)                 |
+| POST   | `/v1/sessions/{id}/refresh`                | extend TTL                                      |
+| POST   | `/v1/sessions/{id}/attach-volumes`         | new session reattaching prior volumes by id     |
+| GET    | `/v1/sessions/{id}/ws`                     | WebSocket upgrade for the PTY relay             |
+| GET    | `/v1/volumes?session_id=`                  | list named volumes                              |
+| DELETE | `/v1/volumes/{id}`                         | delete a named volume                           |
+| POST   | `/v1/admin/volumes/gc`                     | sweep volumes past their retention window       |
+| GET    | `/metrics`                                 | Prometheus exposition                           |
 
 WebSocket frames are JSON-typed: `input`, `output`, `resize`, `ping`,
 `pong`, `close`. See `pkg/api/types.go` for the canonical definitions
@@ -165,6 +170,51 @@ containers survived the crash (`post_kill_count = 5`), and on restart
 the reaper claimed every one of them within 26 seconds.
 **`orphans_remaining = 0`.**
 
+## Cross-session state
+
+Sessions are ephemeral by default — `/workspace` is a tmpfs and the
+rootfs is read-only. To carry filesystem state between sessions, request
+a named volume at create time:
+
+```sh
+curl -X POST http://localhost:8080/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{
+    "image": "alpine:3.20",
+    "volumes": [{"name": "workspace", "mount_path": "/data"}]
+  }'
+```
+
+The manager creates a Docker named volume `devenv-{sid}-workspace` and
+mounts it at `/data`. When the session is reaped (TTL expiry, orphan
+sweep, or DELETE), the volume is **NOT** deleted; it is flagged
+`released` and the retention timer (default 24h) starts. Until the
+retention window closes, the volume can be re-mounted into a new
+session via the attach-volumes route:
+
+```sh
+curl -X POST http://localhost:8080/v1/sessions/{old-session-id}/attach-volumes \
+  -H 'content-type: application/json' \
+  -d '{"volume_ids": ["<volume-id>"], "image": "alpine:3.20"}'
+```
+
+The new session inherits the volume mounts at the path recorded when
+the volume was created. Files written by the prior session are still
+present.
+
+Lifecycle endpoints:
+
+| Method | Path                                | Notes                                         |
+| ------ | ----------------------------------- | --------------------------------------------- |
+| GET    | `/v1/volumes?session_id=`           | list volumes (filterable by session)          |
+| DELETE | `/v1/volumes/{id}`                  | unconditional delete                          |
+| POST   | `/v1/admin/volumes/gc`              | sweep volumes past their retention window     |
+| POST   | `/v1/sessions/{id}/attach-volumes`  | start a new session attaching listed volumes  |
+
+The volume retention default is set by `-volume-retention=24h` at the
+server flag layer; tighten it for short-lived environments, lengthen it
+when sessions are routinely reattached after a delay.
+
 ## What this is *not*
 
 - **Not authenticated.** Single-user assumption. The `owner` label is
@@ -172,8 +222,10 @@ the reaper claimed every one of them within 26 seconds.
 - **Not multi-tenant** in any meaningful sense — the resource limits
   are per-container, but there is no per-user quota system.
 - **Not Kubernetes.** Docker Engine only.
-- **Not persistent.** Sessions are ephemeral; `/workspace` is a tmpfs.
-  No volumes, no bind mounts.
+- ~~Not persistent.~~ Sessions are ephemeral by default but can opt
+  into named volumes that survive reaping; see "Cross-session state"
+  below. There are still no bind mounts and the rootfs remains
+  read-only.
 - **Not a build farm.** Image allowlist only — no `docker build`
   exposed, no arbitrary registry pulls.
 - **No collaborative sessions.** One WS per session.

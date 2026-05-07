@@ -17,14 +17,16 @@ import (
 )
 
 type fakeClient struct {
-	mu           sync.Mutex
-	pingErr      error
-	createErr    error
-	startErr     error
-	createdSpecs []docker.ContainerSpec
-	stopped      []string
-	removed      []string
-	inspectFn    func(string) (docker.ContainerInfo, error)
+	mu             sync.Mutex
+	pingErr        error
+	createErr      error
+	startErr       error
+	createdSpecs   []docker.ContainerSpec
+	stopped        []string
+	removed        []string
+	createdVolumes []string
+	removedVolumes []string
+	inspectFn      func(string) (docker.ContainerInfo, error)
 }
 
 func (f *fakeClient) Ping(ctx context.Context) (string, error) { return "1.45", f.pingErr }
@@ -69,6 +71,18 @@ func (f *fakeClient) Events(ctx context.Context, since time.Time) (<-chan docker
 	close(out)
 	close(errs)
 	return out, errs
+}
+func (f *fakeClient) CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createdVolumes = append(f.createdVolumes, name)
+	return name, nil
+}
+func (f *fakeClient) RemoveVolume(ctx context.Context, name string, force bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removedVolumes = append(f.removedVolumes, name)
+	return nil
 }
 func (f *fakeClient) Close() error { return nil }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 )
@@ -32,6 +33,8 @@ type Client interface {
 	ExecAttach(ctx context.Context, containerID string, cmd []string, tty bool) (HijackedConn, error)
 	ResizeExec(ctx context.Context, execID string, cols, rows uint16) error
 	Events(ctx context.Context, since time.Time) (<-chan EventMessage, <-chan error)
+	CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error)
+	RemoveVolume(ctx context.Context, name string, force bool) error
 	Close() error
 }
 
@@ -52,6 +55,16 @@ type ContainerSpec struct {
 	PIDsLimit int64
 	// Workspace tmpfs
 	WorkspaceTmpfsBytes int64
+	// VolumeMounts attaches Docker named volumes at start time. The
+	// Source must already exist; the volume manager creates it before
+	// the container is started.
+	VolumeMounts []VolumeMount
+}
+
+// VolumeMount is a Docker named-volume mount applied at container start.
+type VolumeMount struct {
+	Source string // docker volume name, e.g. devenv-{sid}-{vname}
+	Target string // path inside the container
 }
 
 // ContainerInfo is the manager-level view of a container, with labels
@@ -172,6 +185,15 @@ func (r *realClient) CreateContainer(ctx context.Context, spec ContainerSpec) (s
 		cpuShares = 256
 	}
 
+	mounts := make([]mount.Mount, 0, len(spec.VolumeMounts))
+	for _, vm := range spec.VolumeMounts {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: vm.Source,
+			Target: vm.Target,
+		})
+	}
+
 	hostCfg := &container.HostConfig{
 		AutoRemove:     false, // we manage removal explicitly via the reaper
 		ReadonlyRootfs: true,
@@ -180,7 +202,7 @@ func (r *realClient) CreateContainer(ctx context.Context, spec ContainerSpec) (s
 			"/workspace": fmt.Sprintf("rw,size=%d", tmpfsBytes),
 			"/tmp":       fmt.Sprintf("rw,size=%d", tmpfsBytes),
 		},
-		Mounts: []mount.Mount{},
+		Mounts: mounts,
 		Resources: container.Resources{
 			CPUShares: cpuShares,
 			Memory:    memBytes,
@@ -227,7 +249,11 @@ func (r *realClient) StopContainer(ctx context.Context, id string, timeout time.
 }
 
 func (r *realClient) RemoveContainer(ctx context.Context, id string, force bool) error {
-	err := r.c.ContainerRemove(ctx, id, container.RemoveOptions{Force: force, RemoveVolumes: true})
+	// RemoveVolumes is intentionally false: the volume manager owns the
+	// lifecycle of named volumes (separate retention from the container
+	// itself). Removing them here would break the cross-session
+	// persistence guarantee.
+	err := r.c.ContainerRemove(ctx, id, container.RemoveOptions{Force: force, RemoveVolumes: false})
 	if err != nil && !client.IsErrNotFound(err) {
 		return err
 	}
@@ -326,6 +352,30 @@ func (r *realClient) ResizeExec(ctx context.Context, execID string, cols, rows u
 		Width:  uint(cols),
 		Height: uint(rows),
 	})
+}
+
+// CreateVolume creates a Docker named volume with the given name and
+// labels. Returns the volume name (Docker uses the name as the
+// canonical identifier; the SDK has no separate ID).
+func (r *realClient) CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error) {
+	v, err := r.c.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   name,
+		Driver: "local",
+		Labels: labels,
+	})
+	if err != nil {
+		return "", fmt.Errorf("docker: volume create %q: %w", name, err)
+	}
+	return v.Name, nil
+}
+
+// RemoveVolume removes a Docker named volume. Idempotent on missing.
+func (r *realClient) RemoveVolume(ctx context.Context, name string, force bool) error {
+	err := r.c.VolumeRemove(ctx, name, force)
+	if err != nil && !client.IsErrNotFound(err) {
+		return fmt.Errorf("docker: volume remove %q: %w", name, err)
+	}
+	return nil
 }
 
 func (r *realClient) Events(ctx context.Context, since time.Time) (<-chan EventMessage, <-chan error) {

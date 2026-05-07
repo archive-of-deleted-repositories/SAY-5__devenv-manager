@@ -11,6 +11,60 @@ type CreateSessionRequest struct {
 	WorkingDir string            `json:"working_dir,omitempty"`
 	Command    []string          `json:"command,omitempty"`
 	TTLSeconds int               `json:"ttl_seconds,omitempty"`
+	// Volumes requests one or more named volumes to be created and
+	// mounted at session start. Each volume becomes a Docker named
+	// volume `devenv-{session_id}-{name}` and survives session reaping
+	// (separate retention from the container itself).
+	Volumes []VolumeSpec `json:"volumes,omitempty"`
+	// AttachVolumeIDs lists existing volume IDs to mount on the new
+	// session's container. Volumes must already have a recorded
+	// MountPath; the session will mount them at that path.
+	AttachVolumeIDs []string `json:"attach_volume_ids,omitempty"`
+}
+
+// VolumeSpec is the per-volume input to a session create or attach call.
+type VolumeSpec struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mount_path"`
+}
+
+// Volume is the manager-level view of a named volume.
+type Volume struct {
+	ID             string    `json:"id"`
+	SessionID      string    `json:"session_id"`
+	Name           string    `json:"name"`
+	DockerVolumeID string    `json:"docker_volume_id"`
+	MountPath      string    `json:"mount_path"`
+	RetentionUntil time.Time `json:"retention_until"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// VolumeStatus is the lifecycle stage of a managed volume.
+const (
+	VolumeStatusActive   = "active"
+	VolumeStatusReleased = "released"
+	VolumeStatusGCed     = "gced"
+)
+
+// ListVolumesResponse is returned from GET /v1/volumes.
+type ListVolumesResponse struct {
+	Volumes []Volume `json:"volumes"`
+}
+
+// AttachVolumesRequest is the body of POST /v1/sessions/{id}/attach-volumes.
+type AttachVolumesRequest struct {
+	VolumeIDs []string `json:"volume_ids"`
+	// Optional override of the session config. Defaults to the parent
+	// session's image/ttl when omitted.
+	Image      string `json:"image,omitempty"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+}
+
+// VolumeGCResponse is returned from POST /v1/admin/volumes/gc.
+type VolumeGCResponse struct {
+	Removed []string `json:"removed_volume_ids"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 // CreateSessionResponse is returned from POST /v1/sessions.

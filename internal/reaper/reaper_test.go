@@ -61,7 +61,11 @@ func (f *fakeClient) Events(ctx context.Context, since time.Time) (<-chan docker
 	close(errs)
 	return out, errs
 }
-func (f *fakeClient) Close() error { return nil }
+func (f *fakeClient) CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error) {
+	return name, nil
+}
+func (f *fakeClient) RemoveVolume(ctx context.Context, name string, force bool) error { return nil }
+func (f *fakeClient) Close() error                                                    { return nil }
 
 var _ io.Closer = (*fakeClient)(nil)
 

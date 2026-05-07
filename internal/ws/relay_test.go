@@ -99,7 +99,11 @@ func (f *fakeDocker) ResizeExec(ctx context.Context, id string, cols, rows uint1
 func (f *fakeDocker) Events(ctx context.Context, since time.Time) (<-chan docker.EventMessage, <-chan error) {
 	return f.eventsCh, f.errsCh
 }
-func (f *fakeDocker) Close() error { return nil }
+func (f *fakeDocker) CreateVolume(ctx context.Context, name string, labels map[string]string) (string, error) {
+	return name, nil
+}
+func (f *fakeDocker) RemoveVolume(ctx context.Context, name string, force bool) error { return nil }
+func (f *fakeDocker) Close() error                                                    { return nil }
 
 func TestRelayPumpsOutputToWS(t *testing.T) {
 	loop := newLoopback()

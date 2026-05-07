@@ -16,6 +16,7 @@ import (
 
 	"github.com/SAY-5/devenv-manager/internal/docker"
 	"github.com/SAY-5/devenv-manager/internal/session"
+	"github.com/SAY-5/devenv-manager/internal/volume"
 	"github.com/SAY-5/devenv-manager/internal/ws"
 	"github.com/SAY-5/devenv-manager/pkg/api"
 	"github.com/coder/websocket"
@@ -36,6 +37,7 @@ var AllowedImages = []string{
 type Config struct {
 	Docker        docker.Client
 	Sessions      *session.Manager
+	Volumes       *volume.Manager
 	DefaultTTL    time.Duration
 	MaxTTL        time.Duration
 	Owner         string
@@ -87,7 +89,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/refresh", s.handleRefreshSession)
+	mux.HandleFunc("POST /v1/sessions/{id}/attach-volumes", s.handleAttachVolumes)
 	mux.HandleFunc("GET /v1/sessions/{id}/ws", s.handleWebSocket)
+	mux.HandleFunc("GET /v1/volumes", s.handleListVolumes)
+	mux.HandleFunc("DELETE /v1/volumes/{id}", s.handleDeleteVolume)
+	mux.HandleFunc("POST /v1/admin/volumes/gc", s.handleVolumeGC)
 	return s.middleware(mux)
 }
 
@@ -157,6 +163,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(r.Context(), w, http.StatusBadRequest, "invalid_body", err.Error(), false)
 		return
 	}
+	s.createSession(w, r, req, "")
+}
+
+// createSession is the shared body of POST /v1/sessions and the
+// attach-volumes flow. parentID, when non-empty, scopes attach permission
+// to volumes that belong to that session.
+func (s *Server) createSession(w http.ResponseWriter, r *http.Request, req api.CreateSessionRequest, parentID string) {
 	if !slices.Contains(AllowedImages, req.Image) {
 		writeErr(r.Context(), w, http.StatusBadRequest, "image_not_allowed",
 			fmt.Sprintf("image %q not in allowlist", req.Image), false)
@@ -171,19 +184,34 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.cfg.Now()
 	id := uuid.NewString()
+
+	// Resolve the volume mounts: newly-requested volumes are created
+	// before the container starts; attached volumes are looked up in the
+	// volume table and their MountPath is honored.
+	mounts, createdVolumes, err := s.resolveVolumeMounts(r.Context(), id, parentID, req)
+	if err != nil {
+		writeErr(r.Context(), w, http.StatusBadRequest, "volume_resolution_failed", err.Error(), false)
+		return
+	}
+
 	spec := docker.ContainerSpec{
-		ID:         id,
-		Image:      req.Image,
-		Owner:      s.cfg.Owner,
-		Env:        req.Env,
-		WorkingDir: req.WorkingDir,
-		Command:    req.Command,
-		LeaseUntil: now.Add(ttl),
-		CreatedAt:  now,
-		CreatedBy:  s.cfg.PID,
+		ID:           id,
+		Image:        req.Image,
+		Owner:        s.cfg.Owner,
+		Env:          req.Env,
+		WorkingDir:   req.WorkingDir,
+		Command:      req.Command,
+		LeaseUntil:   now.Add(ttl),
+		CreatedAt:    now,
+		CreatedBy:    s.cfg.PID,
+		VolumeMounts: mounts,
 	}
 	cid, err := s.cfg.Docker.CreateContainer(r.Context(), spec)
 	if err != nil {
+		// If we already provisioned volumes for this session, leave them
+		// in the table — the operator can clean them up via the volumes
+		// API; deleting them on partial failure would surprise callers
+		// that explicitly opted into persistent storage.
 		writeErr(r.Context(), w, http.StatusInternalServerError, "create_failed", err.Error(), true)
 		return
 	}
@@ -201,6 +229,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   now,
 		ExpiresAt:   spec.LeaseUntil,
 	})
+	if s.cfg.Logger != nil && len(createdVolumes) > 0 {
+		s.cfg.Logger.Info("api: session with volumes",
+			"session", sess.ID, "volumes_created", len(createdVolumes))
+	}
 	writeJSON(w, http.StatusCreated, api.CreateSessionResponse{
 		ID:          sess.ID,
 		ContainerID: sess.ContainerID,
@@ -208,6 +240,40 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   sess.ExpiresAt,
 		Image:       sess.Image,
 	})
+}
+
+// resolveVolumeMounts creates new volumes from req.Volumes and looks up
+// existing volume IDs from req.AttachVolumeIDs. Attach is rejected if
+// the volume manager is not configured or if an attached volume doesn't
+// belong to the parent session (when parentID is set).
+func (s *Server) resolveVolumeMounts(ctx context.Context, sessionID, parentID string, req api.CreateSessionRequest) ([]docker.VolumeMount, []api.Volume, error) {
+	if len(req.Volumes) == 0 && len(req.AttachVolumeIDs) == 0 {
+		return nil, nil, nil
+	}
+	if s.cfg.Volumes == nil {
+		return nil, nil, errors.New("volume manager not configured")
+	}
+	mounts := make([]docker.VolumeMount, 0, len(req.Volumes)+len(req.AttachVolumeIDs))
+	created := make([]api.Volume, 0, len(req.Volumes))
+	for _, vs := range req.Volumes {
+		v, err := s.cfg.Volumes.CreateForSession(ctx, sessionID, vs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create volume %q: %w", vs.Name, err)
+		}
+		created = append(created, v)
+		mounts = append(mounts, docker.VolumeMount{Source: v.DockerVolumeID, Target: v.MountPath})
+	}
+	for _, vid := range req.AttachVolumeIDs {
+		v, err := s.cfg.Volumes.Get(vid)
+		if err != nil {
+			return nil, nil, fmt.Errorf("attach volume %q: %w", vid, err)
+		}
+		if parentID != "" && v.SessionID != parentID {
+			return nil, nil, fmt.Errorf("volume %q does not belong to session %q", vid, parentID)
+		}
+		mounts = append(mounts, docker.VolumeMount{Source: v.DockerVolumeID, Target: v.MountPath})
+	}
+	return mounts, created, nil
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +329,92 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	_ = s.cfg.Docker.StopContainer(r.Context(), sess.ContainerID, 5*time.Second)
 	_ = s.cfg.Docker.RemoveContainer(r.Context(), sess.ContainerID, true)
 	s.cfg.Sessions.Remove(id)
+	// Volumes outlive the session — flag them as released so the
+	// retention timer starts. Operators can DELETE individual volumes
+	// or wait for the GC sweep.
+	if s.cfg.Volumes != nil {
+		s.cfg.Volumes.MarkReleased(id)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAttachVolumes creates a NEW session that mounts the listed
+// existing volumes by id. The path's {id} is the parent session that
+// originally owned the volumes; the parent does not need to be alive
+// because the volume manager carries the durable parent reference. The
+// request body may override the image and TTL; otherwise the manager
+// falls back to the volume's owner-recorded image (or returns an error
+// if the session table no longer carries it).
+func (s *Server) handleAttachVolumes(w http.ResponseWriter, r *http.Request) {
+	parentID := r.PathValue("id")
+	var req api.AttachVolumesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(r.Context(), w, http.StatusBadRequest, "invalid_body", err.Error(), false)
+		return
+	}
+	if len(req.VolumeIDs) == 0 {
+		writeErr(r.Context(), w, http.StatusBadRequest, "no_volumes", "volume_ids must be non-empty", false)
+		return
+	}
+	create := api.CreateSessionRequest{
+		Image:           req.Image,
+		TTLSeconds:      req.TTLSeconds,
+		AttachVolumeIDs: req.VolumeIDs,
+	}
+	if create.Image == "" {
+		// Fall back to a still-live parent's image; if the parent is
+		// already reaped the caller must supply Image explicitly.
+		if parent, err := s.cfg.Sessions.Get(parentID); err == nil {
+			create.Image = parent.Image
+		}
+	}
+	if create.Image == "" {
+		writeErr(r.Context(), w, http.StatusBadRequest, "image_required",
+			"image must be supplied when the parent session has been reaped", false)
+		return
+	}
+	s.createSession(w, r, create, parentID)
+}
+
+func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Volumes == nil {
+		writeJSON(w, http.StatusOK, api.ListVolumesResponse{Volumes: []api.Volume{}})
+		return
+	}
+	sid := r.URL.Query().Get("session_id")
+	out := s.cfg.Volumes.List(sid)
+	writeJSON(w, http.StatusOK, api.ListVolumesResponse{Volumes: out})
+}
+
+func (s *Server) handleDeleteVolume(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.cfg.Volumes == nil {
+		writeErr(r.Context(), w, http.StatusServiceUnavailable, "volumes_disabled",
+			"volume manager not configured", false)
+		return
+	}
+	if err := s.cfg.Volumes.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, volume.ErrNotFound) {
+			writeErr(r.Context(), w, http.StatusNotFound, "not_found", err.Error(), false)
+			return
+		}
+		writeErr(r.Context(), w, http.StatusInternalServerError, "delete_failed", err.Error(), true)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleVolumeGC(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Volumes == nil {
+		writeJSON(w, http.StatusOK, api.VolumeGCResponse{Removed: []string{}})
+		return
+	}
+	removed, errs := s.cfg.Volumes.GC(r.Context())
+	resp := api.VolumeGCResponse{Removed: removed}
+	for _, e := range errs {
+		resp.Errors = append(resp.Errors, e.Error())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRefreshSession(w http.ResponseWriter, r *http.Request) {

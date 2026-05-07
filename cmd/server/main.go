@@ -17,6 +17,7 @@ import (
 	"github.com/SAY-5/devenv-manager/internal/docker"
 	"github.com/SAY-5/devenv-manager/internal/reaper"
 	"github.com/SAY-5/devenv-manager/internal/session"
+	"github.com/SAY-5/devenv-manager/internal/volume"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -28,6 +29,8 @@ func main() {
 	maxTTL := flag.Duration("max-ttl", 30*time.Minute, "maximum session TTL")
 	reapInterval := flag.Duration("reap-interval", 30*time.Second, "reaper loop interval")
 	owner := flag.String("owner", "anonymous", "owner label applied to containers")
+	volumeRetention := flag.Duration("volume-retention", volume.DefaultRetention,
+		"how long a session's named volumes survive after the session is reaped")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -49,6 +52,11 @@ func main() {
 	}
 
 	mgr := session.New(time.Now)
+	volMgr := volume.New(volume.Config{
+		Docker:    dc,
+		Now:       time.Now,
+		Retention: *volumeRetention,
+	})
 
 	// Hydrate from existing labeled containers — this makes restarts idempotent
 	// and keeps the session table addressable across crashes.
@@ -77,6 +85,7 @@ func main() {
 	srv := api.NewServer(api.Config{
 		Docker:     dc,
 		Sessions:   mgr,
+		Volumes:    volMgr,
 		DefaultTTL: *defaultTTL,
 		MaxTTL:     *maxTTL,
 		Owner:      *owner,
