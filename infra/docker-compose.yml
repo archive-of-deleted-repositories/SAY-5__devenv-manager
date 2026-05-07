@@ -1,0 +1,22 @@
+# Local development stack. The manager is built from the repo root and
+# given access to the host Docker socket so it can provision sibling
+# containers (Docker-out-of-Docker, not DinD).
+#
+# Run with: `docker compose -f infra/docker-compose.yml up --build`
+#
+# The frontend isn't included here; run it separately via
+# `pnpm --prefix frontend dev` so HMR is available.
+
+services:
+  manager:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: devenv-manager:local
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - DOCKER_API_VERSION=1.45
+    restart: unless-stopped
