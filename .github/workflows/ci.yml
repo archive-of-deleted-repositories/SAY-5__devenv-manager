@@ -1,0 +1,160 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1.6
+          args: --timeout=5m
+
+  test-go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: unit tests
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: integration tests
+        env:
+          RUN_INTEGRATION: "1"
+        run: go test -race -count=1 -tags=integration -timeout=120s ./internal/docker/...
+      - name: coverage gate
+        run: |
+          pct=$(go tool cover -func=coverage.out | awk '/total:/ {print $3}' | tr -d '%')
+          echo "Go coverage: $pct%"
+          # The internal/docker thin SDK wrapper and the cmd/ entry points
+          # are exercised by integration + chaos tests rather than unit
+          # tests, so the unit-only floor is set deliberately low.
+          awk -v c="$pct" 'BEGIN { exit (c+0 >= 40) ? 0 : 1 }'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+
+  lint-frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  typecheck-frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  test-frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+
+  chaos-smoke:
+    runs-on: ubuntu-24.04
+    needs: [test-go]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: confirm docker daemon
+        run: docker info
+      - name: pre-pull alpine
+        run: docker pull alpine:3.20
+      - name: chaos smoke (2 sessions)
+        env:
+          CHAOS_SESSIONS: "2"
+          CHAOS_TTL: "12"
+          CHAOS_REAP_INTERVAL: "4s"
+          CHAOS_MAX_WAIT: "60"
+          CHAOS_RESULT_FILE: bench/chaos-result-ci.json
+        run: bash bench/chaos.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-result
+          path: |
+            bench/chaos-result-ci.json
+            bench/chaos-server.log
+
+  build-image:
+    runs-on: ubuntu-24.04
+    needs: [test-go, lint-go]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: devenv-manager:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: smoke run
+        run: |
+          docker run --rm devenv-manager:ci --help 2>&1 | head -10 || true
+          docker images devenv-manager:ci
